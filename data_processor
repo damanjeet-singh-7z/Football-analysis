@@ -1,0 +1,355 @@
+"""
+Data Processing Utilities for Football Analysis
+Data cleaning, transformation, and feature engineering
+"""
+
+import pandas as pd
+import numpy as np
+from sklearn.preprocessing import LabelEncoder, StandardScaler
+import logging
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+
+class DataProcessor:
+    """Data processing and feature engineering for football data"""
+    
+    def __init__(self):
+        """Initialize data processor"""
+        self.label_encoders = {}
+        self.scaler = StandardScaler()
+    
+    def clean_data(self, data: pd.DataFrame) -> pd.DataFrame:
+        """
+        Clean raw football data
+        
+        Args:
+            data: Raw DataFrame
+        
+        Returns:
+            Cleaned DataFrame
+        """
+        logger.info("Cleaning data...")
+        df = data.copy()
+        
+        # Remove duplicate rows
+        initial_rows = len(df)
+        df = df.drop_duplicates()
+        logger.info(f"Removed {initial_rows - len(df)} duplicate rows")
+        
+        # Standardize column names
+        df.columns = df.columns.str.strip().str.replace(' ', '_').str.lower()
+        
+        # Handle common data issues
+        for col in df.select_dtypes(include=[object]).columns:
+            # Remove leading/trailing whitespace
+            df[col] = df[col].str.strip() if df[col].dtype == object else df[col]
+            
+            # Replace various null representations
+            df[col] = df[col].replace(['', 'N/A', 'NA', 'null', 'NULL'], np.nan)
+        
+        # Convert percentage strings to floats
+        for col in df.columns:
+            if df[col].dtype == object:
+                # Check if column contains percentage values
+                if df[col].astype(str).str.contains('%', na=False).any():
+                    df[col] = df[col].str.replace('%', '').astype(float) / 100
+        
+        logger.info(f"Data cleaned. Shape: {df.shape}")
+        return df
+    
+    def handle_missing_values(self, data: pd.DataFrame, strategy: str = 'smart') -> pd.DataFrame:
+        """
+        Handle missing values intelligently
+        
+        Args:
+            data: DataFrame with missing values
+            strategy: 'drop', 'mean', 'median', 'mode', or 'smart'
+        
+        Returns:
+            DataFrame with handled missing values
+        """
+        logger.info(f"Handling missing values using '{strategy}' strategy...")
+        df = data.copy()
+        
+        if strategy == 'drop':
+            df = df.dropna()
+        
+        elif strategy == 'mean':
+            numeric_cols = df.select_dtypes(include=[np.number]).columns
+            df[numeric_cols] = df[numeric_cols].fillna(df[numeric_cols].mean())
+        
+        elif strategy == 'median':
+            numeric_cols = df.select_dtypes(include=[np.number]).columns
+            df[numeric_cols] = df[numeric_cols].fillna(df[numeric_cols].median())
+        
+        elif strategy == 'mode':
+            for col in df.columns:
+                if df[col].isnull().any():
+                    mode_val = df[col].mode()
+                    if not mode_val.empty:
+                        df[col].fillna(mode_val[0], inplace=True)
+        
+        elif strategy == 'smart':
+            # Smart strategy: different methods for different column types
+            for col in df.columns:
+                if df[col].isnull().sum() == 0:
+                    continue
+                
+                # For numeric columns
+                if df[col].dtype in [np.float64, np.int64]:
+                    # Use median for skewed distributions
+                    if abs(df[col].skew()) > 1:
+                        df[col].fillna(df[col].median(), inplace=True)
+                    else:
+                        df[col].fillna(df[col].mean(), inplace=True)
+                
+                # For categorical columns
+                else:
+                    mode_val = df[col].mode()
+                    if not mode_val.empty:
+                        df[col].fillna(mode_val[0], inplace=True)
+                    else:
+                        df[col].fillna('Unknown', inplace=True)
+        
+        missing_after = df.isnull().sum().sum()
+        logger.info(f"Missing values remaining: {missing_after}")
+        
+        return df
+    
+    def encode_categorical(self, data: pd.DataFrame, columns: list = None) -> pd.DataFrame:
+        """
+        Encode categorical variables
+        
+        Args:
+            data: DataFrame with categorical variables
+            columns: List of columns to encode (if None, encodes all object columns)
+        
+        Returns:
+            DataFrame with encoded variables
+        """
+        logger.info("Encoding categorical variables...")
+        df = data.copy()
+        
+        if columns is None:
+            columns = df.select_dtypes(include=[object]).columns.tolist()
+        
+        for col in columns:
+            if col not in df.columns:
+                continue
+            
+            # Use label encoding
+            le = LabelEncoder()
+            df[col] = le.fit_transform(df[col].astype(str))
+            self.label_encoders[col] = le
+            
+            logger.info(f"Encoded {col}: {len(le.classes_)} unique values")
+        
+        return df
+    
+    def create_features(self, data: pd.DataFrame) -> pd.DataFrame:
+        """
+        Create engineered features for better predictions
+        
+        Args:
+            data: Input DataFrame
+        
+        Returns:
+            DataFrame with additional features
+        """
+        logger.info("Creating engineered features...")
+        df = data.copy()
+        
+        # Check for required columns and create features
+        try:
+            # Goals per match
+            if 'goals' in df.columns and 'matches' in df.columns:
+                df['goals_per_match'] = df['goals'] / df['matches'].replace(0, 1)
+            
+            # Minutes per match
+            if 'minutes' in df.columns and 'matches' in df.columns:
+                df['minutes_per_match'] = df['minutes'] / df['matches'].replace(0, 1)
+            
+            # Assists per match
+            if 'assists' in df.columns and 'matches' in df.columns:
+                df['assists_per_match'] = df['assists'] / df['matches'].replace(0, 1)
+            
+            # Goals + Assists (Goal contributions)
+            if 'goals' in df.columns and 'assists' in df.columns:
+                df['goal_contributions'] = df['goals'] + df['assists']
+                if 'matches' in df.columns:
+                    df['contributions_per_match'] = df['goal_contributions'] / df['matches'].replace(0, 1)
+            
+            # Goal conversion rate
+            if 'goals' in df.columns and 'shots' in df.columns:
+                df['conversion_rate'] = df['goals'] / df['shots'].replace(0, 1)
+            
+            # Shooting accuracy
+            if 'shots_on_target' in df.columns and 'shots' in df.columns:
+                df['shooting_accuracy'] = df['shots_on_target'] / df['shots'].replace(0, 1)
+            
+            # Pass completion rate
+            if 'passes_completed' in df.columns and 'passes_attempted' in df.columns:
+                df['pass_completion_rate'] = df['passes_completed'] / df['passes_attempted'].replace(0, 1)
+            
+            # Age categories
+            if 'age' in df.columns:
+                df['age_category'] = pd.cut(df['age'], 
+                                           bins=[0, 21, 25, 29, 100],
+                                           labels=['youth', 'prime_young', 'prime', 'experienced'])
+            
+            # Performance consistency score (if multiple match data available)
+            # This would require match-by-match data
+            
+            logger.info(f"Created features. New shape: {df.shape}")
+            
+        except Exception as e:
+            logger.error(f"Error creating features: {e}")
+        
+        return df
+    
+    def remove_outliers(self, data: pd.DataFrame, columns: list = None, 
+                       method: str = 'iqr', threshold: float = 1.5) -> pd.DataFrame:
+        """
+        Remove outliers from numerical columns
+        
+        Args:
+            data: DataFrame
+            columns: Columns to check for outliers (if None, uses all numeric)
+            method: 'iqr' or 'zscore'
+            threshold: Threshold for outlier detection (1.5 for IQR, 3 for z-score)
+        
+        Returns:
+            DataFrame with outliers removed
+        """
+        logger.info(f"Removing outliers using {method} method...")
+        df = data.copy()
+        initial_rows = len(df)
+        
+        if columns is None:
+            columns = df.select_dtypes(include=[np.number]).columns.tolist()
+        
+        for col in columns:
+            if col not in df.columns:
+                continue
+            
+            if method == 'iqr':
+                Q1 = df[col].quantile(0.25)
+                Q3 = df[col].quantile(0.75)
+                IQR = Q3 - Q1
+                lower_bound = Q1 - threshold * IQR
+                upper_bound = Q3 + threshold * IQR
+                df = df[(df[col] >= lower_bound) & (df[col] <= upper_bound)]
+            
+            elif method == 'zscore':
+                z_scores = np.abs((df[col] - df[col].mean()) / df[col].std())
+                df = df[z_scores < threshold]
+        
+        removed = initial_rows - len(df)
+        logger.info(f"Removed {removed} outlier rows ({removed/initial_rows*100:.2f}%)")
+        
+        return df
+    
+    def normalize_features(self, data: pd.DataFrame, columns: list = None) -> pd.DataFrame:
+        """
+        Normalize numerical features
+        
+        Args:
+            data: DataFrame
+            columns: Columns to normalize (if None, normalizes all numeric)
+        
+        Returns:
+            DataFrame with normalized features
+        """
+        logger.info("Normalizing features...")
+        df = data.copy()
+        
+        if columns is None:
+            columns = df.select_dtypes(include=[np.number]).columns.tolist()
+        
+        df[columns] = self.scaler.fit_transform(df[columns])
+        
+        return df
+    
+    def prepare_training_data(self, data: pd.DataFrame, target_col: str):
+        """
+        Complete data preparation pipeline for training
+        
+        Args:
+            data: Raw DataFrame
+            target_col: Target variable column
+        
+        Returns:
+            X, y ready for training
+        """
+        logger.info("Running complete data preparation pipeline...")
+        
+        # Clean data
+        df = self.clean_data(data)
+        
+        # Handle missing values
+        df = self.handle_missing_values(df, strategy='smart')
+        
+        # Create features
+        df = self.create_features(df)
+        
+        # Separate features and target
+        if target_col not in df.columns:
+            raise ValueError(f"Target column '{target_col}' not found in data")
+        
+        y = df[target_col]
+        X = df.drop(columns=[target_col])
+        
+        # Encode categorical variables
+        categorical_cols = X.select_dtypes(include=[object]).columns.tolist()
+        if categorical_cols:
+            X = self.encode_categorical(X, categorical_cols)
+        
+        logger.info(f"Preparation complete. X shape: {X.shape}, y shape: {y.shape}")
+        
+        return X, y
+    
+    def save_processor(self, filepath: str):
+        """Save processor state"""
+        import pickle
+        with open(filepath, 'wb') as f:
+            pickle.dump({
+                'label_encoders': self.label_encoders,
+                'scaler': self.scaler
+            }, f)
+        logger.info(f"Processor saved to {filepath}")
+    
+    def load_processor(self, filepath: str):
+        """Load processor state"""
+        import pickle
+        with open(filepath, 'rb') as f:
+            state = pickle.load(f)
+        self.label_encoders = state['label_encoders']
+        self.scaler = state['scaler']
+        logger.info(f"Processor loaded from {filepath}")
+
+
+# Example usage
+if __name__ == "__main__":
+    # Load sample data
+    try:
+        data = pd.read_csv('Big5_2020_21_Cleaned.csv')
+        
+        # Initialize processor
+        processor = DataProcessor()
+        
+        # Clean data
+        clean_data = processor.clean_data(data)
+        
+        # Handle missing values
+        complete_data = processor.handle_missing_values(clean_data)
+        
+        # Create features
+        featured_data = processor.create_features(complete_data)
+        
+        print(f"\nFinal data shape: {featured_data.shape}")
+        print(f"Columns: {list(featured_data.columns)[:10]}...")
+        
+    except FileNotFoundError:
+        print("Data file not found.")
